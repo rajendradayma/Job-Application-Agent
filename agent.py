@@ -51,8 +51,8 @@ def download_resume_from_github(github_url: str = GITHUB_RESUME_URL) -> str:
 # ─────────────────────────────────────────────
 #  GROQ CLIENT
 # ─────────────────────────────────────────────
-GROQ_API_KEY: str = "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"
-groq_client = Groq(api_key=os.environ.get("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"))
+GROQ_API_KEY = "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"
+groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
 # ─────────────────────────────────────────────
 #  RESUME CONTEXT — fed to Groq for every field
