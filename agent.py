@@ -159,6 +159,24 @@ WORK AUTHORIZATION:
 RESUME_PATH = str(Path(__file__).parent / "resume.pdf")
 GITHUB_RESUME = "https://github.com/rajendradayma/Job-Application-Agent/blob/main/Rajendra_Dayma_FlowCV_Resume_2026-05-28.pdf"
 LOG_FILE = Path(__file__).parent / "applications_log.json"
+PROGRESS_FILE = Path(tempfile.gettempdir()) / "agent_progress.json"
+
+def write_progress(status: str, message: str, step: int = 0, total: int = 0, done: bool = False):
+    """Write current agent status to a file Streamlit can read."""
+    data = {
+        "status": status,
+        "message": message,
+        "step": step,
+        "total": total,
+        "done": done,
+        "timestamp": datetime.now().isoformat()
+    }
+    try:
+        PROGRESS_FILE.write_text(json.dumps(data))
+    except Exception:
+        pass
+    print(f"  [{status}] {message}")
+    sys.stdout.flush()
 
 
 # ─────────────────────────────────────────────
@@ -393,6 +411,7 @@ async def fill_form_with_groq(page):
 
     fields = await get_all_form_fields(page)
     print(f"   Found {len(fields)} fields on this page")
+    write_progress("filling", f"Found {len(fields)} fields - Groq is filling them...", 0, len(fields))
 
     filled = 0
     skipped = 0
@@ -468,6 +487,7 @@ async def fill_form_with_groq(page):
                 await locator.fill(answer)
 
             filled += 1
+            write_progress("filling", f"Filled: {label[:40]}", filled, len(fields))
             await asyncio.sleep(0.4)
 
         except Exception as e:
@@ -489,7 +509,8 @@ async def fill_form_with_groq(page):
     else:
         print(f"  ⚠ Resume not found at: {resume_path}")
 
-    print(f"\n  ✅ Filled: {filled} fields | Skipped: {skipped} fields")
+    print(f"\n  Filled: {filled} fields | Skipped: {skipped} fields")
+    write_progress("filled", f"Filled {filled} fields, skipped {skipped}", filled, filled)
     return filled
 
 
@@ -509,6 +530,7 @@ async def handle_workday_steps(page, company):
         print(f"📄 Step {step} | {current_url[:70]}")
         print(f"{'─'*55}")
         await asyncio.sleep(2)
+        write_progress("navigating", f"Processing form step {step}...", step)
 
         # CAPTCHA check
         if await detect_captcha(page):
@@ -544,8 +566,9 @@ async def handle_workday_steps(page, company):
             try:
                 await submit_btn.click()
                 await asyncio.sleep(3)
-                print(f"\n🎉 Application SUBMITTED to {company}!")
-                log_application(current_url, company, "Submitted ✓")
+                print(f"\nApplication SUBMITTED to {company}!")
+                write_progress("submitted", f"Application submitted to {company}!", done=True)
+                log_application(current_url, company, "Submitted")
                 submitted = True
             except Exception as e:
                 print(f"  ⚠ Submit failed: {e}")
@@ -660,7 +683,8 @@ async def run_agent(job_url: str, company: str):
             print("  ⚠ No URL provided — continuing on current page")
 
         if await detect_captcha(page):
-            print("  🔒 CAPTCHA detected — please solve it and paste the new URL again")
+            print("  CAPTCHA detected")
+            write_progress("captcha", "CAPTCHA detected! Please solve it in your browser.")
 
         # Run Groq-powered form filling
         await handle_workday_steps(page, company)
