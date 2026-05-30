@@ -19,6 +19,34 @@ from datetime import datetime
 from pathlib import Path
 from groq import Groq
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
+import urllib.request
+import tempfile
+
+# ─────────────────────────────────────────────
+#  GITHUB RESUME DOWNLOADER
+# ─────────────────────────────────────────────
+GITHUB_RESUME_URL = "https://github.com/rajendradayma/Job-Application-Agent/blob/main/Rajendra_Dayma_FlowCV_Resume_2026-05-28.pdf"
+
+def get_raw_github_url(github_url: str) -> str:
+    """Convert GitHub blob URL to raw download URL."""
+    raw = github_url.replace("github.com", "raw.githubusercontent.com")
+    raw = raw.replace("/blob/", "/")
+    return raw
+
+def download_resume_from_github(github_url: str = GITHUB_RESUME_URL) -> str:
+    """Download resume PDF from GitHub and return local temp path."""
+    raw_url = get_raw_github_url(github_url)
+    local_path = Path(__file__).parent / "resume_downloaded.pdf"
+    print(f"  📥 Downloading resume from GitHub...")
+    print(f"     {raw_url}")
+    try:
+        urllib.request.urlretrieve(raw_url, local_path)
+        print(f"  ✓ Resume downloaded: {local_path.name} ({local_path.stat().st_size // 1024} KB)")
+        return str(local_path)
+    except Exception as e:
+        print(f"  ⚠ Download failed: {e}")
+        return ""
+
 
 # ─────────────────────────────────────────────
 #  GROQ CLIENT
@@ -108,6 +136,7 @@ WORK AUTHORIZATION:
 """
 
 RESUME_PATH = str(Path(__file__).parent / "resume.pdf")
+GITHUB_RESUME = "https://github.com/rajendradayma/Job-Application-Agent/blob/main/Rajendra_Dayma_FlowCV_Resume_2026-05-28.pdf"
 LOG_FILE = Path(__file__).parent / "applications_log.json"
 
 
@@ -548,6 +577,18 @@ async def run_agent(job_url: str, company: str):
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
         page = await context.new_page()
+
+        # Auto-download resume from GitHub
+        resume_path = os.environ.get("RESUME_PATH", RESUME_PATH)
+        if not Path(resume_path).exists():
+            github_url = os.environ.get("GITHUB_RESUME_URL", GITHUB_RESUME)
+            downloaded = download_resume_from_github(github_url)
+            if downloaded:
+                os.environ["RESUME_PATH"] = downloaded
+            else:
+                print("  ⚠ Could not download resume. Upload will be skipped.")
+        else:
+            print(f"  ✓ Using local resume: {resume_path}")
 
         print(f"🌐 Opening: {job_url}")
         await page.goto(job_url, wait_until="domcontentloaded", timeout=30000)
