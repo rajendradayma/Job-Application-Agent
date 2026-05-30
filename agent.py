@@ -23,6 +23,25 @@ import urllib.request
 import tempfile
 
 # ─────────────────────────────────────────────
+#  GROQ CLIENT — lazy init so secrets load first
+# ─────────────────────────────────────────────
+def get_groq_client():
+    """Get Groq client — reads key at call time, not import time."""
+    import streamlit as st
+    api_key = None
+    # Try Streamlit secrets first
+    try:
+        api_key = st.secrets["GROQ_API_KEY"]
+    except Exception:
+        pass
+    # Fallback to environment variable
+    if not api_key:
+        api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        raise ValueError("GROQ_API_KEY not found in Streamlit secrets or environment variables.")
+    return Groq(api_key=api_key)
+
+# ─────────────────────────────────────────────
 #  GITHUB RESUME DOWNLOADER
 # ─────────────────────────────────────────────
 GITHUB_RESUME_URL = "https://github.com/rajendradayma/Job-Application-Agent/blob/main/Rajendra_Dayma_FlowCV_Resume_2026-05-28.pdf"
@@ -51,8 +70,7 @@ def download_resume_from_github(github_url: str = GITHUB_RESUME_URL) -> str:
 # ─────────────────────────────────────────────
 #  GROQ CLIENT
 # ─────────────────────────────────────────────
-GROQ_API_KEY = "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"
-groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+# groq_client initialized lazily inside get_groq_client()
 
 # ─────────────────────────────────────────────
 #  RESUME CONTEXT — fed to Groq for every field
@@ -173,7 +191,7 @@ Rules:
 Answer:"""
 
     try:
-        response = groq_client.chat.completions.create(
+        response = get_groq_client().chat.completions.create(
             model="llama-3.3-70b-versatile",
             max_tokens=100,
             temperature=0.1,
@@ -205,7 +223,7 @@ Return ONLY the answer text, no explanation.
 Answer:"""
 
     try:
-        response = groq_client.chat.completions.create(
+        response = get_groq_client().chat.completions.create(
             model="llama-3.3-70b-versatile",
             max_tokens=300,
             temperature=0.3,
