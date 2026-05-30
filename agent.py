@@ -469,26 +469,89 @@ async def navigate_workday(page, company):
         await fill_page_with_groq(page)
         await asyncio.sleep(1)
 
-        # Find Submit button first
+        # Workday uses data-automation-id for navigation buttons
+        # Try all known Workday button patterns
         submit_btn = None
-        for txt in ["Submit Application", "Submit", "Apply Now"]:
-            btn = page.locator(f"button:has-text('{txt}'), [data-automation-id='bottomNavigationNext']:has-text('{txt}')").first
-            if await btn.count() > 0:
-                submit_btn = btn
-                print(f"  Found submit: '{txt}'")
-                break
-
         next_btn = None
-        if not submit_btn:
-            for txt in ["Next", "Save and Continue", "Continue", "Save & Continue"]:
-                btn = page.locator(
-                    f"button:has-text('{txt}'), "
-                    f"[data-automation-id='bottomNavigationNext']"
-                ).first
-                if await btn.count() > 0:
-                    next_btn = btn
-                    print(f"  Found next: '{txt}'")
+
+        # All selectors to try for submit
+        submit_selectors = [
+            "[data-automation-id='bottomNavigationSubmitButton']",
+            "[data-automation-id='submitButton']",
+            "button[data-automation-id*='submit' i]",
+            "button:has-text('Submit Application')",
+            "button:has-text('Submit')",
+            "button:has-text('Apply Now')",
+            "button:has-text('Send Application')",
+        ]
+        # All selectors to try for next
+        next_selectors = [
+            "button:has-text('Save and Continue')",
+            "button:has-text('Save & Continue')",
+            "[data-automation-id='bottomNavigationNext']",
+            "[data-automation-id='nextButton']",
+            "button[data-automation-id*='next' i]",
+            "button[data-automation-id*='continue' i]",
+            "button[data-automation-id*='save' i]",
+            "button:has-text('Next')",
+            "button:has-text('Continue')",
+            "button:has-text('Save')",
+            # Workday sometimes wraps button in a div with role=button
+            "[role='button']:has-text('Save and Continue')",
+            "[role='button']:has-text('Next')",
+        ]
+
+        for sel in submit_selectors:
+            try:
+                btn = page.locator(sel).last
+                if await btn.count() > 0 and await btn.is_visible():
+                    submit_btn = btn
+                    print(f"  Found submit: {sel}")
                     break
+            except Exception:
+                pass
+
+        if not submit_btn:
+            for sel in next_selectors:
+                try:
+                    btn = page.locator(sel).last
+                    if await btn.count() > 0 and await btn.is_visible():
+                        next_btn = btn
+                        print(f"  Found next: {sel}")
+                        break
+                except Exception:
+                    pass
+
+        # If still not found, dump all visible buttons for debugging
+        if not submit_btn and not next_btn:
+            all_btns = await page.evaluate("""
+                () => Array.from(document.querySelectorAll('button, [role="button"], [data-automation-id]'))
+                    .filter(b => b.offsetParent)
+                    .map(b => ({
+                        text: b.innerText.trim().slice(0, 50),
+                        automationId: b.getAttribute('data-automation-id') || '',
+                    }))
+                    .filter(b => b.text || b.automationId)
+                    .slice(0, 15)
+            """)
+            btn_summary = [b["automationId"] or b["text"] for b in all_btns if b["automationId"] or b["text"]]
+            print(f"  Visible elements: {btn_summary}")
+            write_progress("waiting", f"Cannot find button. Visible: {btn_summary[:6]}. Retrying in 5s...")
+            await asyncio.sleep(5)
+            # Retry once after wait — page might still be loading
+            for sel in next_selectors + submit_selectors:
+                try:
+                    btn = page.locator(sel).last
+                    if await btn.count() > 0 and await btn.is_visible():
+                        next_btn = btn
+                        print(f"  Found on retry: {sel}")
+                        break
+                except Exception:
+                    pass
+            if not next_btn and not submit_btn:
+                write_progress("error", f"No button found. Page elements: {btn_summary[:6]}")
+                log_application(url, company, "Incomplete — button not found")
+                break
 
         if submit_btn:
             write_progress("submitting", f"Submitting application to {company}...")
@@ -506,12 +569,20 @@ async def navigate_workday(page, company):
 
         elif next_btn:
             try:
-                await next_btn.click()
-                await asyncio.sleep(2.5)
+                await next_btn.scroll_into_view_if_needed()
+                await asyncio.sleep(0.5)
+                await next_btn.click(force=True)
+                await asyncio.sleep(3)
                 step += 1
             except Exception as e:
-                print(f"  Next failed: {e}")
-                step += 1
+                print(f"  Next click failed: {e}, trying JS click...")
+                try:
+                    await page.evaluate("btn => btn.click()", await next_btn.element_handle())
+                    await asyncio.sleep(3)
+                    step += 1
+                except Exception as e2:
+                    print(f"  JS click also failed: {e2}")
+                    step += 1
         else:
             print("  No button found — ending")
             write_progress("error", "Could not find Next or Submit button on this page.")
