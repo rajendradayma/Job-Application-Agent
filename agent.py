@@ -55,12 +55,14 @@ def get_raw_github_url(github_url: str) -> str:
 def download_resume_from_github(github_url: str = GITHUB_RESUME_URL) -> str:
     """Download resume PDF from GitHub and return local temp path."""
     raw_url = get_raw_github_url(github_url)
-    local_path = Path(__file__).parent / "resume_downloaded.pdf"
+    # Use /tmp — always writable on Streamlit Cloud and any OS
+    local_path = Path(tempfile.gettempdir()) / "rajendra_resume.pdf"
     print(f"  📥 Downloading resume from GitHub...")
     print(f"     {raw_url}")
     try:
         urllib.request.urlretrieve(raw_url, local_path)
-        print(f"  ✓ Resume downloaded: {local_path.name} ({local_path.stat().st_size // 1024} KB)")
+        size_kb = local_path.stat().st_size // 1024
+        print(f"  ✓ Resume downloaded to: {local_path} ({size_kb} KB)")
         return str(local_path)
     except Exception as e:
         print(f"  ⚠ Download failed: {e}")
@@ -598,12 +600,14 @@ async def run_agent(job_url: str, company: str):
         page = await context.new_page()
 
         # Auto-download resume from GitHub
+        # Download resume from GitHub if not already present
         resume_path = os.environ.get("RESUME_PATH", RESUME_PATH)
         if not Path(resume_path).exists():
             github_url = os.environ.get("GITHUB_RESUME_URL", GITHUB_RESUME)
             downloaded = download_resume_from_github(github_url)
             if downloaded:
                 os.environ["RESUME_PATH"] = downloaded
+                print(f"  ✓ Resume ready: {downloaded}")
             else:
                 print("  ⚠ Could not download resume. Upload will be skipped.")
         else:
@@ -677,12 +681,19 @@ async def main():
         print("❌ Invalid URL.")
         return
 
+    # Always try to download resume from GitHub first
     resume_path = os.environ.get("RESUME_PATH", RESUME_PATH)
     if not Path(resume_path).exists():
-        print(f"\n⚠  Resume not found at: {resume_path}")
-        alt = input("   Enter full path to resume PDF (or press Enter to skip): ").strip()
-        if alt and Path(alt).exists():
-            os.environ["RESUME_PATH"] = alt
+        print(f"\n📥 Resume not found locally — downloading from GitHub...")
+        github_url = os.environ.get("GITHUB_RESUME_URL", GITHUB_RESUME)
+        downloaded = download_resume_from_github(github_url)
+        if downloaded:
+            os.environ["RESUME_PATH"] = downloaded
+            print(f"  ✓ Resume ready: {downloaded}")
+        else:
+            print("  ⚠ Could not download resume. Continuing without it.")
+    else:
+        print(f"  ✓ Using local resume: {resume_path}")
 
     await run_agent(job_url, company)
 
