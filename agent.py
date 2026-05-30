@@ -592,7 +592,16 @@ async def run_agent(job_url: str, company: str):
 """)
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False, slow_mo=150)
+        # Try system chromium first (Streamlit Cloud), fallback to playwright's
+        import shutil
+        system_chromium = shutil.which("chromium") or shutil.which("chromium-browser")
+        if system_chromium:
+            browser = await p.chromium.launch(
+                headless=True, slow_mo=150,
+                executable_path=system_chromium
+            )
+        else:
+            browser = await p.chromium.launch(headless=True, slow_mo=150)
         context = await browser.new_context(
             viewport={"width": 1280, "height": 900},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
