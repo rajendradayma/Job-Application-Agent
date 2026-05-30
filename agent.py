@@ -446,6 +446,41 @@ async def fill_page_with_groq(page):
     return filled
 
 
+# ── Handle popups & modals ───────────────────
+async def dismiss_popups(page):
+    """Dismiss any Workday popups — legal notice, cookie banners, etc."""
+    popup_selectors = [
+        "[data-automation-id='legalNoticeAcceptButton']",
+        "[data-automation-id='acceptButton']",
+        "[data-automation-id='agree-button']",
+        "button:has-text('Accept')",
+        "button:has-text('Agree')",
+        "button:has-text('I Agree')",
+        "button:has-text('Accept & Continue')",
+        "button:has-text('OK')",
+        "button:has-text('Got it')",
+        "button:has-text('Continue')",
+        "[data-automation-id='cookie-consent-accept']",
+    ]
+    EXCLUDE = ["cancel", "decline", "close", "no", "reject"]
+    dismissed = False
+    for sel in popup_selectors:
+        try:
+            btn = page.locator(sel).first
+            if await btn.count() > 0 and await btn.is_visible():
+                txt = (await btn.inner_text()).strip().lower()
+                if any(ex in txt for ex in EXCLUDE):
+                    continue
+                print(f"  Dismissing popup: '{txt}'")
+                write_progress("navigating", f"Accepting legal notice...")
+                await btn.click()
+                await asyncio.sleep(1.5)
+                dismissed = True
+                break
+        except Exception:
+            pass
+    return dismissed
+
 # ── Navigate Workday steps ────────────────────
 async def navigate_workday(page, company):
     step = 1
@@ -454,6 +489,9 @@ async def navigate_workday(page, company):
 
     while step <= max_steps and not submitted:
         url = page.url
+        # Dismiss any popups/modals first
+        await dismiss_popups(page)
+        await asyncio.sleep(0.5)
         # Detect Workday step name from page
         step_name = ""
         try:
@@ -674,6 +712,7 @@ async def run_agent(job_url, company):
             write_progress("navigating", "Navigating to your authenticated form...")
             await page.goto(post_login_url, wait_until="domcontentloaded", timeout=30000)
             await asyncio.sleep(2)
+            await dismiss_popups(page)
 
         await navigate_workday(page, company)
 
