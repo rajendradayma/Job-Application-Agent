@@ -6,6 +6,7 @@ Then use the UI to launch the agent in a local browser window.
 
 import streamlit as st
 import subprocess
+import tempfile
 import json
 import sys
 import os
@@ -54,6 +55,23 @@ p, li { color: #8aabb8 !important; }
 """, unsafe_allow_html=True)
 
 LOG_FILE = Path("applications_log.json")
+PROGRESS_FILE = Path(tempfile.gettempdir()) / "agent_progress.json"
+
+def read_progress():
+    """Read latest agent progress from shared file."""
+    try:
+        if PROGRESS_FILE.exists():
+            return json.loads(PROGRESS_FILE.read_text())
+    except Exception:
+        pass
+    return None
+
+def clear_progress():
+    try:
+        if PROGRESS_FILE.exists():
+            PROGRESS_FILE.unlink()
+    except Exception:
+        pass
 PROFILE_FILE = Path("profile.json")
 
 DEFAULT_PROFILE = {
@@ -216,15 +234,73 @@ with tab1:
                     try:
                         proc.stdin.write(post_login_url + "\n")
                         proc.stdin.flush()
-                        st.success("✅ URL sent! Groq is now filling the form automatically.")
-                        st.info("Check the application log tab to track progress.")
+                        st.success("URL sent! Groq is now filling the form...")
+                        st.session_state.agent_running = True
                         st.session_state.agent_launched = False
+                        st.rerun()
                     except Exception as e:
                         st.error(f"Could not send URL to agent: {e}")
                 else:
                     st.warning("Agent process is not running. Please launch it again.")
 
 # ── Tab 2: Profile ───────────────────────────
+# ── Live Progress Panel ──────────────────────
+if st.session_state.get("agent_running"):
+    st.markdown("---")
+    progress = read_progress()
+    proc = st.session_state.get("agent_proc")
+
+    STATUS_ICONS = {
+        "starting":   ("🌐", "#64b5f6", "Starting up..."),
+        "navigating": ("🔄", "#64b5f6", "Navigating form..."),
+        "filling":    ("🧠", "#f39c12", "Groq is filling fields..."),
+        "filled":     ("✅", "#2ecc71", "Page filled!"),
+        "submitted":  ("🎉", "#2ecc71", "Submitted!"),
+        "captcha":    ("🔒", "#e74c3c", "CAPTCHA — check your browser!"),
+        "error":      ("❌", "#e74c3c", "Error occurred"),
+    }
+
+    if progress:
+        status = progress.get("status", "starting")
+        message = progress.get("message", "")
+        step = progress.get("step", 0)
+        total = progress.get("total", 0)
+        done = progress.get("done", False)
+        icon, color, label = STATUS_ICONS.get(status, ("⏳", "#64b5f6", status))
+
+        st.markdown(f"""
+        <div style='background:#0a1520;border:1px solid {color}33;border-radius:12px;padding:1.2rem 1.5rem;margin-bottom:1rem;'>
+            <div style='display:flex;align-items:center;gap:10px;margin-bottom:8px;'>
+                <span style='font-size:1.3rem;'>{icon}</span>
+                <span style='font-size:0.9rem;font-weight:500;color:{color};'>{label}</span>
+            </div>
+            <div style='font-size:0.85rem;color:#c8dff0;margin-bottom:10px;'>{message}</div>
+            {f'<div style="background:#1a2d42;border-radius:6px;height:6px;"><div style="background:{color};border-radius:6px;height:6px;width:{min(int((step/total)*100),100) if total else 50}%;transition:width 0.5s;"></div></div><div style="font-size:0.75rem;color:#4a7a9b;margin-top:4px;">{step}/{total} fields</div>' if total > 0 else ''}
+        </div>
+        """, unsafe_allow_html=True)
+
+        if done or status == "submitted":
+            st.balloons()
+            st.success("Application submitted successfully! Check the Application Log tab.")
+            st.session_state.agent_running = False
+            clear_progress()
+        elif status == "captcha":
+            st.warning("CAPTCHA detected in the headless browser. This may require manual intervention.")
+        else:
+            # Auto-refresh every 3 seconds while running
+            import time
+            time.sleep(3)
+            st.rerun()
+    else:
+        if proc and proc.poll() is None:
+            st.info("Agent is starting up... refreshing in 3 seconds")
+            import time
+            time.sleep(3)
+            st.rerun()
+        else:
+            st.warning("Agent finished or stopped.")
+            st.session_state.agent_running = False
+
 with tab2:
     st.markdown("#### Your details — used to auto-fill every Workday form")
     profile = load_profile()
