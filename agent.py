@@ -454,8 +454,21 @@ async def navigate_workday(page, company):
 
     while step <= max_steps and not submitted:
         url = page.url
-        print(f"\n--- Step {step} | {url[:70]}")
-        write_progress("navigating", f"Processing step {step}...", step)
+        # Detect Workday step name from page
+        step_name = ""
+        try:
+            step_el = await page.locator(
+                "[data-automation-id='currentStepName'], "
+                "[data-automation-id='stepNumber'], "
+                "ol li[aria-current='step'], "
+                ".css-step--active, h2"
+            ).first.inner_text()
+            step_name = step_el.strip()[:50]
+        except Exception:
+            pass
+        label = f"Step {step}/5: {step_name}" if step_name else f"Step {step}"
+        print(f"\n--- {label} | {url[:60]}")
+        write_progress("navigating", f"{label} — filling form...", step, 5)
         await asyncio.sleep(2)
 
         # CAPTCHA check
@@ -478,12 +491,16 @@ async def navigate_workday(page, company):
         submit_selectors = [
             "[data-automation-id='bottomNavigationSubmitButton']",
             "[data-automation-id='submitButton']",
-            "button[data-automation-id*='submit' i]",
+            "[data-automation-id='Submit']",
             "button:has-text('Submit Application')",
             "button:has-text('Submit')",
             "button:has-text('Apply Now')",
             "button:has-text('Send Application')",
+            # Workday Review step final button
+            "[data-automation-id='review-submit-button']",
         ]
+        # Words that must NOT be in the button text (false positive guard)
+        EXCLUDE_BUTTON_TEXT = ["create account", "create", "sign in", "log in", "cancel", "back", "remove"]
         # All selectors to try for next
         next_selectors = [
             "button:has-text('Save and Continue')",
@@ -501,12 +518,22 @@ async def navigate_workday(page, company):
             "[role='button']:has-text('Next')",
         ]
 
+        async def is_valid_btn(locator, exclude=EXCLUDE_BUTTON_TEXT):
+            try:
+                if await locator.count() == 0: return False
+                if not await locator.is_visible(): return False
+                txt = (await locator.inner_text()).strip().lower()
+                if any(ex in txt for ex in exclude): return False
+                return True
+            except Exception:
+                return False
+
         for sel in submit_selectors:
             try:
                 btn = page.locator(sel).last
-                if await btn.count() > 0 and await btn.is_visible():
+                if await is_valid_btn(btn):
                     submit_btn = btn
-                    print(f"  Found submit: {sel}")
+                    print(f"  Found submit: {sel} -> '{(await btn.inner_text()).strip()}'")
                     break
             except Exception:
                 pass
@@ -515,9 +542,9 @@ async def navigate_workday(page, company):
             for sel in next_selectors:
                 try:
                     btn = page.locator(sel).last
-                    if await btn.count() > 0 and await btn.is_visible():
+                    if await is_valid_btn(btn):
                         next_btn = btn
-                        print(f"  Found next: {sel}")
+                        print(f"  Found next: {sel} -> '{(await btn.inner_text()).strip()}'")
                         break
                 except Exception:
                     pass
