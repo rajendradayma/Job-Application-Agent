@@ -1,13 +1,6 @@
 """
 Workday Job Application Agent — Rajendra Dayma
-Powered by Groq LLaMA 3.3 70B for intelligent field filling
-----------------------------------------------
-How it works:
-1. You paste a Workday job URL
-2. Browser opens — you log in manually
-3. Press Enter — Groq LLM reads each form field and decides the best answer
-4. Agent fills, navigates, and submits
-5. CAPTCHA? It pauses for you to solve
+Powered by Groq LLaMA 3.3 70B
 """
 
 import asyncio
@@ -15,162 +8,69 @@ import json
 import os
 import sys
 import re
+import tempfile
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 from groq import Groq
-from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
-import urllib.request
-import tempfile
+from playwright.async_api import async_playwright
 
-# ─────────────────────────────────────────────
-#  GROQ CLIENT — lazy init so secrets load first
-# ─────────────────────────────────────────────
-def get_groq_client():
-    """Get Groq client — reads key at call time, not import time."""
-    import streamlit as st
-    api_key = None
-    # Try Streamlit secrets first
-    try:
-        api_key = st.secrets["GROQ_API_KEY"]
-    except Exception:
-        pass
-    # Fallback to environment variable
-    if not api_key:
-        api_key = os.environ.get("GROQ_API_KEY")
-    if not api_key:
-        raise ValueError("GROQ_API_KEY not found in Streamlit secrets or environment variables.")
-    return Groq(api_key=api_key)
+# ── Config ───────────────────────────────────
+GITHUB_RESUME = "https://github.com/rajendradayma/Job-Application-Agent/blob/main/Rajendra_Dayma_FlowCV_Resume_2026-05-28.pdf"
+LOG_FILE = Path(__file__).parent / "applications_log.json"
+PROGRESS_FILE = Path(tempfile.gettempdir()) / "agent_progress.json"
+RESUME_PATH = str(Path(__file__).parent / "resume.pdf")
 
-# ─────────────────────────────────────────────
-#  GITHUB RESUME DOWNLOADER
-# ─────────────────────────────────────────────
-GITHUB_RESUME_URL = "https://github.com/rajendradayma/Job-Application-Agent/blob/main/Rajendra_Dayma_FlowCV_Resume_2026-05-28.pdf"
-
-def get_raw_github_url(github_url: str) -> str:
-    """Convert GitHub blob URL to raw download URL."""
-    raw = github_url.replace("github.com", "raw.githubusercontent.com")
-    raw = raw.replace("/blob/", "/")
-    return raw
-
-def download_resume_from_github(github_url: str = GITHUB_RESUME_URL) -> str:
-    """Download resume PDF from GitHub and return local temp path."""
-    raw_url = get_raw_github_url(github_url)
-    # Use /tmp — always writable on Streamlit Cloud and any OS
-    local_path = Path(tempfile.gettempdir()) / "rajendra_resume.pdf"
-    print(f"  📥 Downloading resume from GitHub...")
-    print(f"     {raw_url}")
-    try:
-        urllib.request.urlretrieve(raw_url, local_path)
-        size_kb = local_path.stat().st_size // 1024
-        print(f"  ✓ Resume downloaded to: {local_path} ({size_kb} KB)")
-        return str(local_path)
-    except Exception as e:
-        print(f"  ⚠ Download failed: {e}")
-        return ""
-
-
-# ─────────────────────────────────────────────
-#  GROQ CLIENT
-# ─────────────────────────────────────────────
-# groq_client initialized lazily inside get_groq_client()
-
-# ─────────────────────────────────────────────
-#  RESUME CONTEXT — fed to Groq for every field
-# ─────────────────────────────────────────────
+# ── Resume context for Groq ──────────────────
 RESUME_CONTEXT = """
-You are a job application assistant filling out a Workday form on behalf of Rajendra Dayma.
-Here is his complete resume information:
+You are filling a Workday job application form for Rajendra Dayma.
 
 PERSONAL:
 - Full name: Rajendra Dayma
 - First name: Rajendra
 - Last name: Dayma
 - Email: rajendradayma88@gmail.com
-- Phone: 7067409386 (country: India, +91)
-- Address: Bhopal, Madhya Pradesh, India
+- Phone: 7067409386 (India +91)
 - City: Bhopal
 - State: Madhya Pradesh
 - Country: India
-- ZIP/Postal code: 462001
+- ZIP: 462001
 - LinkedIn: https://linkedin.com/in/rajendradayma
 - GitHub: https://github.com/rajendradayma
-- Website: https://github.com/rajendradayma
 
-CURRENT EXPERIENCE:
-- Current company: DataNeuron
-- Current job title: Data Science Intern
-- Start date: October 2025
-- Still working: Yes
-- Key work: RAG pipelines, LLMs, AI agents, Multi-Agent Systems, Knowledge Graphs, PEFT, RBAC RAG system
+CURRENT JOB:
+- Company: DataNeuron
+- Title: Data Science Intern
+- Start: October 2025, still working
+- Work: RAG pipelines, LLMs, AI agents, Multi-Agent Systems, Knowledge Graphs, PEFT, RBAC
 
-PREVIOUS EXPERIENCE:
-- Company: Xapton Solutions, Title: Junior AI/ML Engineer, Jun 2025 – Sep 2025
-  Work: FastAPI microservices, AI agent integration, Dell GCS Partner onboarding, schema validation
-- Company: Code Clause, Title: Data Science Intern, Mar 2023 – Apr 2023
-  Work: Data collection, preprocessing, visualization, statistical analysis
-- Company: IBM SkillsBuild, Title: AI Intern, Jan 2023 – Mar 2023
-  Work: AI Drowsiness Assistant System using facial recognition and ML
+PREVIOUS JOBS:
+- Junior AI/ML Engineer at Xapton Solutions (Jun–Sep 2025): FastAPI, AI agents, microservices
+- Data Science Intern at Code Clause (Mar–Apr 2023): data analysis, visualization
+- AI Intern at IBM SkillsBuild (Jan–Mar 2023): drowsiness detection system
 
-TOTAL EXPERIENCE: 2 years in AI/ML/Data Science
+TOTAL EXPERIENCE: 2 years AI/ML
 
 EDUCATION:
 - Degree: Bachelor of Technology (B.Tech)
-- Field of study / Major: Computer Science and Engineering (specialization in Data Science)
-- University: Oriental Institute of Science and Technology
-- Location: Bhopal, India
-- GPA/CGPA: 8.11 out of 10
-- Graduation year: 2024
-- Start year: 2020
+- Major: Computer Science and Engineering (Data Science)
+- University: Oriental Institute of Science and Technology, Bhopal
+- GPA: 8.11/10
+- Graduated: 2024 (started 2020)
 
-SKILLS:
-- Languages: Python, C/C++, Java, SQL, R, Bash
-- Frameworks: LangChain, LangGraph, FastAPI, Flask, PyTorch, TensorFlow, Scikit-learn, Streamlit, Hugging Face, OpenAI API
-- Tools: Docker, Kubernetes, Git, MLflow, AWS, Azure, MongoDB, ChromaDB, Neo4j, pgvector
-- Domains: RAG, LLMs, AI Agents, MAS, NLP, MLOps, Knowledge Graphs, Data Science, API Development
+SKILLS: Python, LangChain, RAG, LLMs, FastAPI, Docker, PyTorch, AWS, NLP, MLOps, AI Agents
 
-PROJECTS:
-1. Role-Based Access Control RAG System (Feb 2026–Present)
-   Tech: Python, RAG, LLMs, Vector DB, LangChain, Streamlit, RBAC
-   - Document Q&A with RBAC, ingestion pipeline, embeddings, secure multi-user interface
+CERTS: IBM Data Science, Oracle Cloud GenAI Professional, AWS Analytics, Supervised ML
 
-2. AI Chatbot for Business Automation
-   Tech: GPT-4, LangChain, FastAPI, MongoDB, Streamlit, Docker
-   - GPT-4 chatbot with RAG, FAISS/ChromaDB vector search, Docker deployment
+WORK AUTH: Authorized to work in India. No sponsorship needed. Open to relocate. Open to remote.
 
-CERTIFICATIONS:
-- IBM Data Science Specialization
-- Oracle Cloud Infrastructure 2025 Generative AI Professional
-- Supervised Machine Learning
-- Getting Started with Data Analytics on AWS
-- TCS iON Career Edge - Young Professional
-- AI, Empathy & Ethics
-- Database and SQL for Data Science with Python
-
-AWARDS:
-- Rank 6 in DataViz Hackathon — IIM Calcutta (Aug 2023)
-
-WORK AUTHORIZATION:
-- Authorized to work in India: Yes
-- Requires visa sponsorship: No
-- Willing to relocate: Yes
-- Open to remote work: Yes
+AWARDS: Rank 6, DataViz Hackathon, IIM Calcutta (Aug 2023)
 """
 
-RESUME_PATH = str(Path(__file__).parent / "resume.pdf")
-GITHUB_RESUME = "https://github.com/rajendradayma/Job-Application-Agent/blob/main/Rajendra_Dayma_FlowCV_Resume_2026-05-28.pdf"
-LOG_FILE = Path(__file__).parent / "applications_log.json"
-PROGRESS_FILE = Path(tempfile.gettempdir()) / "agent_progress.json"
-
-def write_progress(status: str, message: str, step: int = 0, total: int = 0, done: bool = False):
-    """Write current agent status to a file Streamlit can read."""
-    data = {
-        "status": status,
-        "message": message,
-        "step": step,
-        "total": total,
-        "done": done,
-        "timestamp": datetime.now().isoformat()
-    }
+# ── Helpers ──────────────────────────────────
+def write_progress(status, message, step=0, total=0, done=False):
+    data = {"status": status, "message": message, "step": step,
+            "total": total, "done": done, "timestamp": datetime.now().isoformat()}
     try:
         PROGRESS_FILE.write_text(json.dumps(data))
     except Exception:
@@ -178,86 +78,35 @@ def write_progress(status: str, message: str, step: int = 0, total: int = 0, don
     print(f"  [{status}] {message}")
     sys.stdout.flush()
 
-
-# ─────────────────────────────────────────────
-#  GROQ: ASK LLM TO FILL A FIELD
-# ─────────────────────────────────────────────
-def ask_groq_for_field(field_label: str, field_type: str, options: list = None, context: str = "") -> str:
-    """Ask Groq LLaMA to determine the best answer for a form field."""
-    options_text = ""
-    if options:
-        options_text = f"\nAvailable options to choose from: {options}\nReturn ONLY one of these options exactly as written."
-
-    prompt = f"""
-{RESUME_CONTEXT}
-
-TASK:
-A Workday job application form has a field. Determine the correct value to fill in based on the resume above.
-
-Field label: "{field_label}"
-Field type: {field_type}
-Additional context on the page: "{context}"{options_text}
-
-Rules:
-- Return ONLY the value to fill in — no explanation, no extra text, no quotes
-- If it's a Yes/No question, return exactly "Yes" or "No"
-- If it's a dropdown and options are given, return exactly one of the options
-- If you cannot determine the answer from the resume, return: SKIP
-- For date fields return format: MM/YYYY or YYYY as appropriate
-- Keep answers concise and professional
-- For "how did you hear about us" type questions, answer: "Job Board"
-- For salary/compensation questions, return: SKIP (leave blank)
-
-Answer:"""
-
+def get_groq_client():
+    api_key = None
     try:
-        response = get_groq_client().chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            max_tokens=100,
-            temperature=0.1,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        answer = response.choices[0].message.content.strip()
-        # Clean up common LLM artifacts
-        answer = answer.strip('"\'').strip()
-        return answer
-    except Exception as e:
-        print(f"    ⚠ Groq error for field '{field_label}': {e}")
-        return "SKIP"
+        import streamlit as st
+        api_key = st.secrets.get("GROQ_API_KEY")
+    except Exception:
+        pass
+    if not api_key:
+        api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        raise ValueError("GROQ_API_KEY not found in secrets or environment.")
+    return Groq(api_key=api_key)
 
+def get_raw_github_url(url):
+    return url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
 
-def ask_groq_for_textarea(field_label: str, context: str = "") -> str:
-    """Ask Groq to write a longer answer for textarea fields."""
-    prompt = f"""
-{RESUME_CONTEXT}
-
-TASK:
-A Workday job application has a text area field that requires a longer answer.
-
-Field label: "{field_label}"
-Page context: "{context}"
-
-Write a professional, concise answer (2-4 sentences max) based on Rajendra's resume.
-Return ONLY the answer text, no explanation.
-
-Answer:"""
-
+def download_resume():
+    local = Path(tempfile.gettempdir()) / "rajendra_resume.pdf"
+    github_url = os.environ.get("GITHUB_RESUME_URL", GITHUB_RESUME)
+    raw_url = get_raw_github_url(github_url)
+    write_progress("starting", "Downloading resume from GitHub...")
     try:
-        response = get_groq_client().chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            max_tokens=300,
-            temperature=0.3,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return response.choices[0].message.content.strip()
+        urllib.request.urlretrieve(raw_url, local)
+        print(f"  Resume downloaded: {local} ({local.stat().st_size // 1024} KB)")
+        return str(local)
     except Exception as e:
-        print(f"    ⚠ Groq error for textarea '{field_label}': {e}")
+        print(f"  Resume download failed: {e}")
         return ""
 
-
-# ─────────────────────────────────────────────
-#  HELPERS
-# ─────────────────────────────────────────────
 def load_log():
     if LOG_FILE.exists():
         return json.loads(LOG_FILE.read_text())
@@ -266,483 +115,495 @@ def load_log():
 def save_log(entries):
     LOG_FILE.write_text(json.dumps(entries, indent=2))
 
-def log_application(url, company, status, notes=""):
+def log_application(url, company, status):
     entries = load_log()
-    entries.append({
-        "url": url, "company": company,
-        "status": status, "notes": notes,
-        "timestamp": datetime.now().isoformat()
-    })
+    entries.append({"url": url, "company": company, "status": status,
+                    "timestamp": datetime.now().isoformat()})
     save_log(entries)
-    print(f"\n✅ Logged: {company} — {status}")
 
-def print_log():
-    entries = load_log()
-    if not entries:
-        print("No applications logged yet.")
-        return
-    print(f"\n{'─'*65}")
-    print(f"{'COMPANY':<25} {'STATUS':<20} {'DATE'}")
-    print(f"{'─'*65}")
-    for e in entries:
-        print(f"{e['company']:<25} {e['status']:<20} {e['timestamp'][:10]}")
-    print(f"{'─'*65}\n")
+# ── Groq field answering ─────────────────────
+def ask_groq(label, ftype, options=None, context=""):
+    opts_text = f"\nChoose EXACTLY one of these options: {options}" if options else ""
+    prompt = f"""{RESUME_CONTEXT}
 
-async def wait_for_user(msg):
-    print(f"\n⏸  {msg}")
-    print("   Press ENTER to continue...")
-    await asyncio.get_event_loop().run_in_executor(None, input)
+A Workday form field needs to be filled:
+Field label: "{label}"
+Field type: {ftype}
+Page context: "{context}"{opts_text}
 
-async def detect_captcha(page):
-    selectors = [
-        "iframe[src*='recaptcha']", "iframe[src*='hcaptcha']",
-        ".g-recaptcha", "#captcha", "[data-sitekey]",
-        "iframe[title*='challenge']", "iframe[title*='CAPTCHA']"
-    ]
-    for sel in selectors:
-        try:
-            if await page.locator(sel).count() > 0:
-                return True
-        except Exception:
-            pass
-    return False
+Rules:
+- Return ONLY the value, no explanation, no quotes
+- Yes/No questions: return exactly Yes or No
+- If options provided: return exactly one option as written
+- Dates: MM/YYYY format
+- Salary/compensation: return SKIP
+- Unknown fields: return SKIP
 
+Answer:"""
+    try:
+        r = get_groq_client().chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            max_tokens=80,
+            temperature=0.1,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return r.choices[0].message.content.strip().strip('"\'')
+    except Exception as e:
+        print(f"    Groq error: {e}")
+        return "SKIP"
 
-# ─────────────────────────────────────────────
-#  SMART FIELD EXTRACTION FROM PAGE
-# ─────────────────────────────────────────────
-async def get_all_form_fields(page):
-    """Extract all visible form fields with their labels from the page."""
+def ask_groq_long(label, context=""):
+    prompt = f"""{RESUME_CONTEXT}
+
+Write a 2-3 sentence professional answer for this Workday form field:
+Field: "{label}"
+Context: "{context}"
+
+Return ONLY the answer text:"""
+    try:
+        r = get_groq_client().chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            max_tokens=250,
+            temperature=0.3,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return r.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"    Groq error: {e}")
+        return ""
+
+# ── Workday-specific field extractor ─────────
+async def extract_workday_fields(page):
+    """
+    Workday uses data-automation-id attributes on its custom React components.
+    This extractor specifically targets Workday's component patterns.
+    """
+    # Scroll to load all lazy fields
+    await page.evaluate("""
+        async () => {
+            for (let i = 0; i < 5; i++) {
+                window.scrollBy(0, 400);
+                await new Promise(r => setTimeout(r, 300));
+            }
+            window.scrollTo(0, 0);
+        }
+    """)
+    await asyncio.sleep(1)
+
     fields = await page.evaluate("""
     () => {
         const results = [];
-        const inputs = document.querySelectorAll(
-            'input:not([type="hidden"]):not([type="file"]):not([type="submit"]):not([type="checkbox"]):not([type="radio"]), textarea, select'
-        );
+        const seen = new Set();
 
-        inputs.forEach(input => {
-            if (!input.offsetParent) return; // skip hidden
+        function getText(el) {
+            return el ? el.innerText.replace(/[*\\n]/g,'').trim() : '';
+        }
 
-            let label = '';
-            // Try aria-label
-            if (input.getAttribute('aria-label')) {
-                label = input.getAttribute('aria-label');
+        function findLabel(el) {
+            // Walk up DOM to find associated label text
+            let node = el;
+            for (let i = 0; i < 8; i++) {
+                if (!node) break;
+                // aria-label on element itself
+                if (node.getAttribute && node.getAttribute('aria-label')) {
+                    return node.getAttribute('aria-label').replace(/[*]/g,'').trim();
+                }
+                // aria-labelledby
+                if (node.getAttribute && node.getAttribute('aria-labelledby')) {
+                    const ids = node.getAttribute('aria-labelledby').split(' ');
+                    const t = ids.map(id => {
+                        const e = document.getElementById(id);
+                        return e ? getText(e) : '';
+                    }).filter(Boolean).join(' ');
+                    if (t) return t;
+                }
+                // label[for=id]
+                if (el.id) {
+                    const lbl = document.querySelector('label[for="' + el.id + '"]');
+                    if (lbl) return getText(lbl);
+                }
+                // Workday label siblings / parents
+                if (node.parentElement) {
+                    const lbl = node.parentElement.querySelector(
+                        'label, [data-automation-id="formLabel"], [class*="label"], [class*="Label"]'
+                    );
+                    if (lbl && lbl !== el && getText(lbl)) return getText(lbl);
+                }
+                node = node.parentElement;
             }
-            // Try associated label tag
-            else if (input.id) {
-                const lbl = document.querySelector(`label[for="${input.id}"]`);
-                if (lbl) label = lbl.innerText.trim();
-            }
-            // Try closest label parent
-            else {
-                const parent = input.closest('label');
-                if (parent) label = parent.innerText.trim();
-            }
-            // Try aria-labelledby
-            if (!label && input.getAttribute('aria-labelledby')) {
-                const lblEl = document.getElementById(input.getAttribute('aria-labelledby'));
-                if (lblEl) label = lblEl.innerText.trim();
-            }
-            // Try placeholder as fallback
-            if (!label && input.placeholder) {
-                label = input.placeholder;
-            }
+            return el.placeholder || el.getAttribute('name') || '';
+        }
 
-            // Get select options
-            let options = [];
-            if (input.tagName === 'SELECT') {
-                options = Array.from(input.options).map(o => o.text).filter(t => t && t !== '-- Select --' && t !== 'Select...');
-            }
+        function addField(label, type, el, opts=[]) {
+            label = label.replace(/[*]/g,'').trim();
+            if (!label || label.length > 120) return;
+            const key = label.toLowerCase();
+            if (seen.has(key)) return;
+            seen.add(key);
+            results.push({
+                label,
+                type,
+                id: el.id || '',
+                name: el.name || el.getAttribute('name') || '',
+                automationId: el.getAttribute('data-automation-id') || '',
+                options: opts,
+                value: el.value || el.innerText?.trim() || '',
+                isWorkday: true
+            });
+        }
 
-            if (label) {
-                results.push({
-                    label: label.replace(/\\*/g, '').trim(),
-                    type: input.tagName === 'SELECT' ? 'select' : (input.tagName === 'TEXTAREA' ? 'textarea' : input.type || 'text'),
-                    id: input.id || '',
-                    name: input.name || '',
-                    placeholder: input.placeholder || '',
-                    options: options,
-                    value: input.value || ''
-                });
-            }
+        // 1. Standard inputs
+        document.querySelectorAll('input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=file])').forEach(el => {
+            if (!el.offsetParent) return;
+            const label = findLabel(el);
+            if (label) addField(label, el.type || 'text', el);
         });
 
-        // Also get checkboxes and radio buttons
-        const checks = document.querySelectorAll('input[type="checkbox"], input[type="radio"]');
-        checks.forEach(input => {
-            if (!input.offsetParent) return;
-            let label = '';
-            if (input.id) {
-                const lbl = document.querySelector(`label[for="${input.id}"]`);
-                if (lbl) label = lbl.innerText.trim();
-            }
-            if (label) {
-                results.push({
-                    label: label.replace(/\\*/g, '').trim(),
-                    type: input.type,
-                    id: input.id || '',
-                    name: input.name || '',
-                    options: [],
-                    value: input.value || ''
-                });
-            }
+        // 2. Textareas
+        document.querySelectorAll('textarea').forEach(el => {
+            if (!el.offsetParent) return;
+            const label = findLabel(el);
+            if (label) addField(label, 'textarea', el);
+        });
+
+        // 3. Standard selects
+        document.querySelectorAll('select').forEach(el => {
+            if (!el.offsetParent) return;
+            const label = findLabel(el);
+            const opts = Array.from(el.options).map(o => o.text.trim()).filter(t => t && !['Select...','--',''].includes(t));
+            if (label) addField(label, 'select', el, opts);
+        });
+
+        // 4. Workday custom dropdowns (role=combobox or data-automation-id selects)
+        document.querySelectorAll('[role="combobox"], [data-automation-id="selectWidget"], [data-automation-id="comboBox"]').forEach(el => {
+            if (!el.offsetParent) return;
+            const label = findLabel(el);
+            if (!label) return;
+            // Get options from the listbox if open, else from data attributes
+            const listbox = document.querySelector('[role="listbox"]');
+            const opts = listbox
+                ? Array.from(listbox.querySelectorAll('[role="option"]')).map(o => o.innerText.trim()).filter(Boolean)
+                : [];
+            addField(label, 'workday-select', el, opts);
+        });
+
+        // 5. Workday radio buttons
+        document.querySelectorAll('[role="radio"], [data-automation-id="radioBtn"]').forEach(el => {
+            if (!el.offsetParent) return;
+            const label = findLabel(el);
+            if (label) addField(label, 'radio', el);
+        });
+
+        // 6. Workday checkboxes
+        document.querySelectorAll('[role="checkbox"], [data-automation-id="checkboxPanel"]').forEach(el => {
+            if (!el.offsetParent) return;
+            const label = findLabel(el);
+            if (label) addField(label, 'checkbox', el);
         });
 
         return results;
     }
     """)
+
     return fields
 
 
-# ─────────────────────────────────────────────
-#  GROQ-POWERED FORM FILLER
-# ─────────────────────────────────────────────
-async def fill_form_with_groq(page):
-    """Use Groq LLM to intelligently fill every field on the current page."""
-    print("\n🤖 Groq is reading the form fields...")
+# ── Fill one field ────────────────────────────
+async def fill_field(page, field, page_context):
+    label = field["label"]
+    ftype = field["type"]
+    options = field.get("options", [])
+    fid = field.get("id", "")
+    fname = field.get("name", "")
+    automation_id = field.get("automationId", "")
 
-    # Get page context (job title / company from page title or headings)
+    # Ask Groq
+    if ftype == "textarea":
+        answer = ask_groq_long(label, page_context)
+    else:
+        answer = ask_groq(label, ftype, options if options else None, page_context)
+
+    if not answer or answer.upper() == "SKIP":
+        return False
+
+    print(f"    -> '{answer[:60]}'")
+
+    try:
+        # Build locator — try multiple strategies
+        locator = None
+
+        if fid:
+            locator = page.locator(f"#{fid}").first
+        elif fname:
+            locator = page.locator(f"[name='{fname}']").first
+        elif automation_id:
+            locator = page.locator(f"[data-automation-id='{automation_id}']").first
+
+        if not locator or await locator.count() == 0:
+            # Try by label text
+            locator = page.get_by_label(label, exact=False).first
+
+        if not locator or await locator.count() == 0:
+            return False
+
+        if ftype in ("select",):
+            try:
+                await locator.select_option(label=answer)
+            except Exception:
+                # Try partial match
+                for opt in options:
+                    if answer.lower() in opt.lower():
+                        try:
+                            await locator.select_option(label=opt)
+                            break
+                        except Exception:
+                            pass
+
+        elif ftype == "workday-select":
+            # Click to open dropdown, then click the option
+            await locator.click()
+            await asyncio.sleep(0.8)
+            # Type to filter
+            await page.keyboard.type(answer[:20], delay=50)
+            await asyncio.sleep(0.8)
+            # Click first matching option
+            option = page.locator(f"[role='option']:has-text('{answer[:20]}')").first
+            if await option.count() > 0:
+                await option.click()
+            else:
+                await page.keyboard.press("Escape")
+
+        elif ftype in ("checkbox", "radio"):
+            if answer.lower() in ("yes", "true", "1"):
+                try:
+                    await locator.check()
+                except Exception:
+                    await locator.click()
+
+        else:
+            # Text / textarea
+            await locator.click()
+            await locator.fill("")
+            await locator.type(answer, delay=30)
+
+        await asyncio.sleep(0.4)
+        return True
+
+    except Exception as e:
+        print(f"    Could not fill '{label}': {e}")
+        return False
+
+
+# ── Fill entire page ──────────────────────────
+async def fill_page_with_groq(page):
+    write_progress("scanning", "Scanning Workday form fields...")
+
     page_context = ""
     try:
-        heading = await page.locator("h1, h2, .job-title, [data-automation-id='jobPostingHeader']").first.inner_text()
+        heading = await page.locator("h1, h2, [data-automation-id='jobPostingHeader']").first.inner_text()
         page_context = heading[:200]
     except Exception:
         pass
 
-    fields = await get_all_form_fields(page)
-    print(f"   Found {len(fields)} fields on this page")
-    write_progress("filling", f"Found {len(fields)} fields - Groq is filling them...", 0, len(fields))
+    fields = await extract_workday_fields(page)
+    total = len(fields)
+    print(f"\n  Found {total} fields")
+    write_progress("filling", f"Found {total} fields — Groq filling...", 0, total)
 
     filled = 0
     skipped = 0
 
-    for field in fields:
+    for i, field in enumerate(fields):
         label = field["label"]
-        ftype = field["type"]
-        options = field["options"]
-        field_id = field["id"]
-        field_name = field["name"]
-
-        if not label or len(label) < 2:
+        if field.get("value") and field["type"] not in ("workday-select",):
+            print(f"  -> Already filled: {label[:40]}")
             continue
 
-        # Skip already-filled fields
-        if field["value"] and ftype not in ("select",):
-            print(f"  ↷ Already filled: {label[:40]}")
-            continue
+        print(f"  [{i+1}/{total}] {field['type']} | {label[:50]}")
+        write_progress("filling", f"Filling: {label[:45]}", i+1, total)
 
-        print(f"  🧠 Groq filling: [{ftype}] {label[:50]}...")
-
-        # Ask Groq
-        if ftype == "textarea":
-            answer = ask_groq_for_textarea(label, page_context)
-        else:
-            answer = ask_groq_for_field(label, ftype, options if options else None, page_context)
-
-        if not answer or answer == "SKIP":
-            print(f"     → Skipped")
-            skipped += 1
-            continue
-
-        print(f"     → '{answer[:60]}'")
-
-        # Fill the field on the page
-        try:
-            # Find the element
-            locator = None
-            if field_id:
-                locator = page.locator(f"#{field_id}").first
-            elif field_name:
-                locator = page.locator(f"[name='{field_name}']").first
-            else:
-                locator = page.locator(f"[aria-label='{label}']").first
-
-            if not locator or await locator.count() == 0:
-                skipped += 1
-                continue
-
-            if ftype == "select":
-                # Try exact match first, then partial
-                try:
-                    await locator.select_option(label=answer)
-                except Exception:
-                    # Try to find best matching option
-                    for opt in options:
-                        if answer.lower() in opt.lower() or opt.lower() in answer.lower():
-                            try:
-                                await locator.select_option(label=opt)
-                                break
-                            except Exception:
-                                pass
-
-            elif ftype in ("checkbox", "radio"):
-                if answer.lower() in ("yes", "true", "1"):
-                    try:
-                        await locator.check()
-                    except Exception:
-                        pass
-
-            else:
-                await locator.click()
-                await locator.fill(answer)
-
+        success = await fill_field(page, field, page_context)
+        if success:
             filled += 1
-            write_progress("filling", f"Filled: {label[:40]}", filled, len(fields))
-            await asyncio.sleep(0.4)
-
-        except Exception as e:
-            print(f"     ⚠ Could not fill: {e}")
+        else:
             skipped += 1
 
-    # Handle resume upload separately
-    resume_path = os.environ.get("RESUME_PATH", RESUME_PATH)
-    if Path(resume_path).exists():
+    # Upload resume
+    resume = os.environ.get("RESUME_PATH", RESUME_PATH)
+    if Path(resume).exists():
         try:
             upload = page.locator("input[type='file']").first
             if await upload.count() > 0:
-                await upload.set_input_files(resume_path)
-                print(f"  ✓ Uploaded resume: {Path(resume_path).name}")
+                await upload.set_input_files(resume)
+                print("  Uploaded resume PDF")
+                write_progress("filling", "Uploaded resume PDF", filled, total)
                 filled += 1
                 await asyncio.sleep(1)
         except Exception as e:
-            print(f"  ⚠ Resume upload: {e}")
-    else:
-        print(f"  ⚠ Resume not found at: {resume_path}")
+            print(f"  Resume upload failed: {e}")
 
-    print(f"\n  Filled: {filled} fields | Skipped: {skipped} fields")
-    write_progress("filled", f"Filled {filled} fields, skipped {skipped}", filled, filled)
+    write_progress("filled", f"Done: {filled} filled, {skipped} skipped", filled, total)
     return filled
 
 
-# ─────────────────────────────────────────────
-#  WORKDAY STEP NAVIGATOR
-# ─────────────────────────────────────────────
-async def handle_workday_steps(page, company):
-    """Navigate through Workday's multi-step application using Groq to fill each page."""
+# ── Navigate Workday steps ────────────────────
+async def navigate_workday(page, company):
     step = 1
     max_steps = 15
     submitted = False
-    last_url = ""
 
     while step <= max_steps and not submitted:
-        current_url = page.url
-        print(f"\n{'─'*55}")
-        print(f"📄 Step {step} | {current_url[:70]}")
-        print(f"{'─'*55}")
+        url = page.url
+        print(f"\n--- Step {step} | {url[:70]}")
+        write_progress("navigating", f"Processing step {step}...", step)
         await asyncio.sleep(2)
-        write_progress("navigating", f"Processing form step {step}...", step)
 
         # CAPTCHA check
-        if await detect_captcha(page):
-            await wait_for_user("🔒 CAPTCHA detected! Please solve it in the browser.")
-            await asyncio.sleep(2)
-
-        # Fill current page with Groq
-        await fill_form_with_groq(page)
-        await asyncio.sleep(1)
-
-        # Find navigation buttons
-        submit_btn = None
-        next_btn = None
-
-        for txt in ["Submit Application", "Submit", "Apply Now", "Send Application"]:
-            btn = page.locator(f"button:has-text('{txt}')").first
-            if await btn.count() > 0:
-                submit_btn = btn
-                print(f"  🚀 Found submit button: '{txt}'")
+        for sel in ["iframe[src*='recaptcha']", "iframe[src*='hcaptcha']", "[data-sitekey]"]:
+            if await page.locator(sel).count() > 0:
+                write_progress("captcha", "CAPTCHA detected! Please solve it in your browser.")
+                await asyncio.sleep(5)
                 break
 
+        # Fill current page
+        await fill_page_with_groq(page)
+        await asyncio.sleep(1)
+
+        # Find Submit button first
+        submit_btn = None
+        for txt in ["Submit Application", "Submit", "Apply Now"]:
+            btn = page.locator(f"button:has-text('{txt}'), [data-automation-id='bottomNavigationNext']:has-text('{txt}')").first
+            if await btn.count() > 0:
+                submit_btn = btn
+                print(f"  Found submit: '{txt}'")
+                break
+
+        next_btn = None
         if not submit_btn:
             for txt in ["Next", "Save and Continue", "Continue", "Save & Continue"]:
-                btn = page.locator(f"button:has-text('{txt}')").first
+                btn = page.locator(
+                    f"button:has-text('{txt}'), "
+                    f"[data-automation-id='bottomNavigationNext']"
+                ).first
                 if await btn.count() > 0:
                     next_btn = btn
-                    print(f"  ➡ Found next button: '{txt}'")
+                    print(f"  Found next: '{txt}'")
                     break
 
-        # Act on buttons
         if submit_btn:
-            await wait_for_user("Ready to SUBMIT. Review the form in the browser, then press Enter to submit.")
+            write_progress("submitting", f"Submitting application to {company}...")
             try:
                 await submit_btn.click()
                 await asyncio.sleep(3)
-                print(f"\nApplication SUBMITTED to {company}!")
                 write_progress("submitted", f"Application submitted to {company}!", done=True)
-                log_application(current_url, company, "Submitted")
+                log_application(url, company, "Submitted")
                 submitted = True
             except Exception as e:
-                print(f"  ⚠ Submit failed: {e}")
-                await wait_for_user("Please click Submit manually in the browser, then press Enter.")
-                log_application(current_url, company, "Manually Submitted")
+                print(f"  Submit failed: {e}")
+                write_progress("error", f"Submit failed: {e}")
+                log_application(url, company, "Submit failed — check browser")
                 submitted = True
 
         elif next_btn:
             try:
                 await next_btn.click()
                 await asyncio.sleep(2.5)
-                # Check if page actually changed
-                if page.url == last_url:
-                    print("  ⚠ Page didn't change — there may be validation errors.")
-                    await wait_for_user("Fix any errors in the browser, then press Enter.")
-                last_url = page.url
                 step += 1
             except Exception as e:
-                print(f"  ⚠ Next failed: {e}")
-                await wait_for_user("Please click Next manually, then press Enter.")
+                print(f"  Next failed: {e}")
                 step += 1
         else:
-            print("  ⚠ No Next/Submit button found on this page.")
-            await wait_for_user("Please navigate manually to the next step, then press Enter.")
-            if page.url != current_url:
-                step += 1
-
-    if not submitted:
-        log_application(page.url, company, "Incomplete — check browser")
+            print("  No button found — ending")
+            write_progress("error", "Could not find Next or Submit button on this page.")
+            log_application(url, company, "Incomplete — no button found")
+            break
 
     return submitted
 
 
-# ─────────────────────────────────────────────
-#  MAIN AGENT RUNNER
-# ─────────────────────────────────────────────
-async def run_agent(job_url: str, company: str):
-    print(f"""
-╔══════════════════════════════════════════════════╗
-║  🎯 Workday Agent (Groq LLaMA 3.3 70B)          ║
-║  Applicant: Rajendra Dayma                       ║
-║  Company:   {company:<38}║
-╚══════════════════════════════════════════════════╝
-""")
+# ── Main agent ────────────────────────────────
+async def run_agent(job_url, company):
+    print(f"\n=== Workday Agent | {company} ===")
+
+    # Download resume
+    resume_path = os.environ.get("RESUME_PATH", RESUME_PATH)
+    if not Path(resume_path).exists():
+        downloaded = download_resume()
+        if downloaded:
+            os.environ["RESUME_PATH"] = downloaded
 
     async with async_playwright() as p:
-        # Try system chromium first (Streamlit Cloud), fallback to playwright's
         import shutil
-        system_chromium = shutil.which("chromium") or shutil.which("chromium-browser")
-        if system_chromium:
-            browser = await p.chromium.launch(
-                headless=True, slow_mo=150,
-                executable_path=system_chromium
-            )
-        else:
-            browser = await p.chromium.launch(headless=True, slow_mo=150)
+        sys_chrome = shutil.which("chromium") or shutil.which("chromium-browser")
+        launch_args = {
+            "headless": True,
+            "slow_mo": 200,
+            "args": ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+        }
+        if sys_chrome:
+            launch_args["executable_path"] = sys_chrome
+
+        browser = await p.chromium.launch(**launch_args)
         context = await browser.new_context(
             viewport={"width": 1280, "height": 900},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
         page = await context.new_page()
 
-        # Auto-download resume from GitHub
-        # Download resume from GitHub if not already present
-        resume_path = os.environ.get("RESUME_PATH", RESUME_PATH)
-        if not Path(resume_path).exists():
-            github_url = os.environ.get("GITHUB_RESUME_URL", GITHUB_RESUME)
-            downloaded = download_resume_from_github(github_url)
-            if downloaded:
-                os.environ["RESUME_PATH"] = downloaded
-                print(f"  ✓ Resume ready: {downloaded}")
-            else:
-                print("  ⚠ Could not download resume. Upload will be skipped.")
-        else:
-            print(f"  ✓ Using local resume: {resume_path}")
-
-        print(f"🌐 Opening: {job_url}")
+        write_progress("starting", f"Opening job page for {company}...")
         await page.goto(job_url, wait_until="domcontentloaded", timeout=30000)
         await asyncio.sleep(2)
 
-        # Click Apply button if on the job listing page
-        for apply_text in ["Apply", "Apply Now", "Apply for Job", "Quick Apply"]:
-            btn = page.locator(f"button:has-text('{apply_text}'), a:has-text('{apply_text}')").first
+        # Click Apply on the job listing page
+        for txt in ["Apply", "Apply Now", "Apply for Job"]:
+            btn = page.locator(f"button:has-text('{txt}'), a:has-text('{txt}')").first
             if await btn.count() > 0:
-                print(f"  ✓ Clicking '{apply_text}'...")
                 await btn.click()
                 await asyncio.sleep(2)
                 break
 
-        # Step 1: Open job page so user can see the login URL
-        print(f"\n{'─'*55}")
-        print("📋 LOGIN STEP — Do this in your browser:")
-        print(f"  1. Open this URL in your browser: {job_url}")
-        print(f"  2. Log in to your Workday account")
-        print(f"  3. Navigate to the application form page")
-        print(f"  4. Copy the URL from your browser address bar")
-        print(f"  5. Paste it below and press Enter")
-        print(f"{'─'*55}")
-
-        # Wait for user to paste the authenticated URL (via stdin — works from Streamlit or terminal)
-        print("  ⏳ Waiting for you to log in and paste the URL...")
+        # Wait for post-login URL from Streamlit or terminal
+        print("\n--- WAITING FOR POST-LOGIN URL ---")
+        print("Log in on your browser, navigate to the form, paste the URL.")
+        write_progress("waiting", "Waiting for you to log in and send the URL...")
         sys.stdout.flush()
+
         post_login_url = await asyncio.get_event_loop().run_in_executor(
             None, lambda: sys.stdin.readline().strip()
         )
 
         if post_login_url and post_login_url.startswith("http"):
-            print(f"  🌐 Navigating to: {post_login_url[:80]}")
+            write_progress("navigating", "Navigating to your authenticated form...")
             await page.goto(post_login_url, wait_until="domcontentloaded", timeout=30000)
             await asyncio.sleep(2)
-        else:
-            print("  ⚠ No URL provided — continuing on current page")
 
-        if await detect_captcha(page):
-            print("  CAPTCHA detected")
-            write_progress("captcha", "CAPTCHA detected! Please solve it in your browser.")
+        await navigate_workday(page, company)
 
-        # Run Groq-powered form filling
-        await handle_workday_steps(page, company)
-
-        print("\n✅ Agent finished. Press Enter to close the browser.")
-        await asyncio.get_event_loop().run_in_executor(None, input)
+        print("\nAgent done. Closing in 5 seconds...")
+        await asyncio.sleep(5)
         await browser.close()
 
 
-# ─────────────────────────────────────────────
-#  ENTRY POINT
-# ─────────────────────────────────────────────
 async def main():
-    if not os.environ.get("GROQ_API_KEY"):
-        print("❌ GROQ_API_KEY not set.")
-        print("   Export it: export GROQ_API_KEY='gsk_...'")
-        sys.exit(1)
+    if not (os.environ.get("GROQ_API_KEY")):
+        # Try streamlit secrets
+        try:
+            import streamlit as st
+            if not st.secrets.get("GROQ_API_KEY"):
+                raise ValueError("No key")
+        except Exception:
+            print("ERROR: GROQ_API_KEY not set.")
+            sys.exit(1)
 
     if len(sys.argv) >= 3:
-        job_url = sys.argv[1]
-        company = sys.argv[2]
+        job_url, company = sys.argv[1], sys.argv[2]
     else:
-        print("""
-╔══════════════════════════════════════════════╗
-║   🎯 Workday Agent — Powered by Groq LLaMA  ║
-╚══════════════════════════════════════════════╝
-        """)
-        print("1. Apply to a job")
-        print("2. View application log")
-        print("3. Exit")
-        choice = input("\nChoose (1/2/3): ").strip()
-
-        if choice == "2":
-            print_log()
-            return
-        elif choice == "3":
-            return
-
-        job_url = input("\nPaste Workday job URL: ").strip()
+        job_url = input("Workday job URL: ").strip()
         company = input("Company name: ").strip()
 
     if not job_url.startswith("http"):
-        print("❌ Invalid URL.")
+        print("Invalid URL.")
         return
-
-    # Always try to download resume from GitHub first
-    resume_path = os.environ.get("RESUME_PATH", RESUME_PATH)
-    if not Path(resume_path).exists():
-        print(f"\n📥 Resume not found locally — downloading from GitHub...")
-        github_url = os.environ.get("GITHUB_RESUME_URL", GITHUB_RESUME)
-        downloaded = download_resume_from_github(github_url)
-        if downloaded:
-            os.environ["RESUME_PATH"] = downloaded
-            print(f"  ✓ Resume ready: {downloaded}")
-        else:
-            print("  ⚠ Could not download resume. Continuing without it.")
-    else:
-        print(f"  ✓ Using local resume: {resume_path}")
 
     await run_agent(job_url, company)
 
