@@ -153,40 +153,76 @@ with tab1:
         </div>""", unsafe_allow_html=True)
 
     st.markdown("")
+
+    # ── Step 1: Launch ──
+    if "agent_launched" not in st.session_state:
+        st.session_state.agent_launched = False
+    if "agent_proc" not in st.session_state:
+        st.session_state.agent_proc = None
+
     col_a, col_b = st.columns(2)
     with col_a:
-        launch = st.button("🚀 Launch Agent", use_container_width=True)
+        launch = st.button("🚀 Step 1 — Launch Agent", use_container_width=True)
     with col_b:
-        st.info("💡 The agent runs in a **new browser window** on your computer. Keep the terminal open.")
+        st.info("💡 Agent opens a headless browser. After launching, log in on your phone/PC and paste the URL below.")
 
     if launch:
         if not job_url or not job_url.startswith("http"):
             st.error("Please enter a valid Workday job URL.")
         elif not company:
             st.error("Please enter the company name.")
-        elif not github_resume_url.startswith("https://github.com"):
-            st.error("Please enter a valid GitHub URL starting with https://github.com")
         else:
-            st.success(f"✅ Launching agent for **{company}**...")
-            st.markdown("""
-            <div style='background:#0d1f0a;border:1px solid #1a4a20;border-radius:8px;padding:1rem;margin-top:0.5rem;'>
-                <p style='color:#2ecc71;font-size:0.88rem;margin:0;font-weight:500;'>Agent launched in your terminal!</p>
-                <p style='color:#4a7a9b;font-size:0.82rem;margin:6px 0 0;'>
-                1. A browser window will open<br>
-                2. Log in to your Workday account in the browser<br>
-                3. Go back to the terminal and press <strong style='color:#c8dff0;'>Enter</strong><br>
-                4. Agent will fill and submit the form automatically
-                </p>
-            </div>
-            """, unsafe_allow_html=True)
-
-            # Launch agent as subprocess
-            cmd = [sys.executable, "agent.py", job_url, company]
             env = os.environ.copy()
             env["GITHUB_RESUME_URL"] = github_resume_url
-            # Clear any stale local path so agent downloads from GitHub
             env.pop("RESUME_PATH", None)
-            subprocess.Popen(cmd, env=env)
+            proc = subprocess.Popen(
+                [sys.executable, "agent.py", job_url, company],
+                env=env, stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True
+            )
+            st.session_state.agent_proc = proc
+            st.session_state.agent_launched = True
+            st.session_state.agent_company = company
+            st.success(f"✅ Agent launched for **{company}**!")
+
+    # ── Step 2: Paste post-login URL ──
+    if st.session_state.agent_launched:
+        st.markdown("---")
+        st.markdown("""
+        <div style='background:#0d1520;border:1px solid #1e3a5f;border-radius:10px;padding:1.2rem;margin-bottom:1rem;'>
+            <p style='color:#64b5f6;font-size:0.9rem;font-weight:500;margin:0 0 8px;'>📋 Step 2 — Log in and share the URL</p>
+            <p style='color:#4a7a9b;font-size:0.82rem;margin:0;line-height:1.7;'>
+            1. Open the job URL in <strong style='color:#c8dff0;'>your phone or browser</strong><br>
+            2. Click <strong style='color:#c8dff0;'>Apply</strong> on the job page<br>
+            3. <strong style='color:#c8dff0;'>Log in</strong> to your Workday account<br>
+            4. Once you reach the <strong style='color:#c8dff0;'>application form</strong>, copy the URL<br>
+            5. Paste it below and click <strong style='color:#c8dff0;'>Send to Agent</strong>
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        post_login_url = st.text_input(
+            "Paste your post-login application form URL here",
+            placeholder="https://wd3.myworkdaysite.com/recruiting/company/job/..."
+        )
+
+        if st.button("✅ Step 2 — Send URL to Agent & Start Filling", use_container_width=True):
+            if not post_login_url or not post_login_url.startswith("http"):
+                st.error("Please paste a valid URL from your browser after logging in.")
+            else:
+                proc = st.session_state.agent_proc
+                if proc and proc.poll() is None:
+                    try:
+                        proc.stdin.write(post_login_url + "\n")
+                        proc.stdin.flush()
+                        st.success("✅ URL sent! Groq is now filling the form automatically.")
+                        st.info("Check the application log tab to track progress.")
+                        st.session_state.agent_launched = False
+                    except Exception as e:
+                        st.error(f"Could not send URL to agent: {e}")
+                else:
+                    st.warning("Agent process is not running. Please launch it again.")
 
 # ── Tab 2: Profile ───────────────────────────
 with tab2:
