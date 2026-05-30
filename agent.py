@@ -635,16 +635,32 @@ async def run_agent(job_url: str, company: str):
                 await asyncio.sleep(2)
                 break
 
-        # Manual login step
-        await wait_for_user(
-            "📋 MANUAL LOGIN STEP\n"
-            "   1. Log in (or create your Workday account) in the browser\n"
-            "   2. Navigate to the application form\n"
-            "   Then press Enter and Groq will take over"
+        # Step 1: Open job page so user can see the login URL
+        print(f"\n{'─'*55}")
+        print("📋 LOGIN STEP — Do this in your browser:")
+        print(f"  1. Open this URL in your browser: {job_url}")
+        print(f"  2. Log in to your Workday account")
+        print(f"  3. Navigate to the application form page")
+        print(f"  4. Copy the URL from your browser address bar")
+        print(f"  5. Paste it below and press Enter")
+        print(f"{'─'*55}")
+
+        # Wait for user to paste the authenticated URL (via stdin — works from Streamlit or terminal)
+        print("  ⏳ Waiting for you to log in and paste the URL...")
+        sys.stdout.flush()
+        post_login_url = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: sys.stdin.readline().strip()
         )
 
+        if post_login_url and post_login_url.startswith("http"):
+            print(f"  🌐 Navigating to: {post_login_url[:80]}")
+            await page.goto(post_login_url, wait_until="domcontentloaded", timeout=30000)
+            await asyncio.sleep(2)
+        else:
+            print("  ⚠ No URL provided — continuing on current page")
+
         if await detect_captcha(page):
-            await wait_for_user("🔒 CAPTCHA detected! Please solve it, then press Enter.")
+            print("  🔒 CAPTCHA detected — please solve it and paste the new URL again")
 
         # Run Groq-powered form filling
         await handle_workday_steps(page, company)
